@@ -399,7 +399,7 @@ def main(argv):
             async def echo(websocket):
                 async for message in websocket:
                     try:
-                        r = run(parse(lex(message)))
+                        r = run(parse(lex(str(message))))
                         await websocket.send(r)
                     except Exception as e:
                         await websocket.send(f'ERROR: {e}')
