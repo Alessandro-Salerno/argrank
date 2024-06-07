@@ -400,9 +400,9 @@ def main(argv):
                 async for message in websocket:
                     try:
                         r = run(parse(lex(message)))
-                        websocket.send(r)
+                        await websocket.send(r)
                     except Exception as e:
-                        websocket.send(f'ERROR: {e}')
+                        await websocket.send(f'ERROR: {e}')
 
             async def serve_main():
                 async with serve(echo, "localhost", 8765):
