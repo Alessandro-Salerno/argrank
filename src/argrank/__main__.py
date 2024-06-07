@@ -406,7 +406,7 @@ def main(argv):
                         await websocket.send(f'ERROR: {e}')
 
             async def serve_main():
-                async with serve(echo, "localhost", 8765):
+                async with serve(echo, "", 8765):
                     await asyncio.Future()
 
             asyncio.run(serve_main())
