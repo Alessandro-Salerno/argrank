@@ -1,6 +1,7 @@
 import texttable
 import csv
 import sys
+import regex
 
 
 class Comand:
@@ -38,38 +39,90 @@ class Link:
         self.subject = subject
         self.id = id
 
+    def __str__(self) -> str:
+        return f'{self.subject}({self.id})'
+
 class Record:
-    def __init__(self, macro=None, arg=None, links=[]):
+    def __init__(self, macro=None, arg=None, links=[], subject=None):
+        self.id = None
+        self.subject = subject
         self.macro = macro
         self.arg = arg
-        self.links = links
+        self.links = []
 
     def to_array(self):
-        return [self.macro, self.arg]
+        return [self.id, self.macro, self.arg]
+
+class LinkedRecord:
+    def __init__(self, subject, start_topic, end_topic) -> None:
+        self.id = None
+        self.subject = subject
+        self.start_topic = start_topic
+        self.end_topic = end_topic
+
+    def to_array(self):
+        return [self.id, self.start_topic, self.end_topic]
+        
+class RouteRecord:
+    def __init__(self, topic, subject, next_hop) -> None:
+        self.id = None
+        self.topic = topic
+        self.subject = subject
+        self.next_hop = next_hop
+
+    def to_array(self):
+        return [self.id, self.topic, self.subject, self.next_hop]
+        
+
+
 
 class Table:
     def __init__(self, header):
         self.header = header
+        self.insert_index = 0
         self.rows = []
-        # self.indices = {
-        #         'macro': {},
-        #         'reverse': {}
-        # }
+        self.table_index = {}
+
 
     def add_record(self, record):
         self.rows.append(record)
-        return len(self.rows) - 1
+        if record.id == None:
+            record.id = self.insert_index
+            self.insert_index += 1
+        self.table_index[record.id] = record
+        return record.id
+
 
     def get_record(self, id):
-        return self.rows[id]
+        if id in self.table_index:
+            return self.table_index[id]
+
+        for row in self.rows:
+            if row.id == id:
+                return row
+
+
+    def fuzzy_search(self, col, item):
+        result = []
+        for row in self.rows:
+            r = regex.findall('(%s){e<=3}' % row.to_array()[col], item, overlapped=True)
+            if len(r) > 0:
+                result.append(row)
+        return result
+
 
     def to_ascii_table(self):
+        if len(self.rows) == 0:
+            return 'Empty set'
+
         header: list = self.header.copy()
         header.insert(0, 'ID')
+        header.insert(0, 'IDX')
         rows: list = [header,]
 
         halign = ['l' for _ in header]
         halign[0] = 'r'
+        halign[1] = 'r'
         valign = ['m' for _ in header]
 
         for index, row in enumerate(self.rows):
@@ -88,6 +141,7 @@ class Table:
     #     self.indices[index][]
 
 DATABASE = {}
+LOOKUP = {}
 
 def lex(command: str):
     command = command.replace('\n', ' ').replace('\r', '')
@@ -174,20 +228,13 @@ def parse(tokens: list):
             case 'ex':
                 r.ex.append(expect().value)
 
-            case 'filter':
-                c = Comand()
-                c.command = t.value
-
-                c.arg = expect().value
-                r.commands.append(c)
-
-            case 'select':
+            case 'filter' | 'select' | 'index':
                 c = Comand()
                 c.command = t.value
                 c.arg = expect().value
                 r.commands.append(c)
 
-            case 'link':
+            case 'link' | 'routes':
                 c = Comand()
                 c.command = t.value
                 r.commands.append(c)
@@ -198,6 +245,59 @@ def parse(tokens: list):
             break
 
     return r
+
+def link(excludes, topic, base_topic, prev_hop=None, explored=None):
+    table = Table(['FROM', 'TO'])
+
+    if explored == None:
+        explored = []
+
+    if prev_hop == None:
+        prev_hop = base_topic
+
+    if topic == None:
+        return table
+
+    def subjects(t):
+        s = []
+        for row in t.rows:
+            if row.subject not in s:
+                s.append(row.subject)
+        return s
+
+    def count_subjects(t):
+        return len(subjects(t))
+
+    aux_tables = []
+
+    for l in topic.links:
+        if l.subject not in excludes and l.id not in explored and l.id != base_topic.id:
+            hop = LOOKUP[l.id]
+            explored.append(l.id)
+            r = link(excludes, hop, base_topic, topic, explored)
+            explored.clear()
+            t = Table(table.header)
+            t.add_record(LinkedRecord(hop.subject, topic.arg, hop.arg))
+
+            for row in r.rows:
+                t.add_record(LinkedRecord(row.subject, row.start_topic, row.end_topic))
+
+            if count_subjects(t) > count_subjects(table):
+                table = t
+            elif topic == base_topic:
+                aux_tables.append(t)
+
+    if topic == base_topic and count_subjects(table) < len(DATABASE.keys()):
+        s = subjects(table)
+        aux_tables = sorted(aux_tables, key=lambda t: len(t.rows), reverse=True)
+        for aux in aux_tables:
+            for row in aux.rows:
+                if row.subject not in s or row.subject == base_topic.subject:
+                    row.id = None
+                    table.add_record(row)
+                    s.append(row.subject)
+
+    return table
 
 def run(pr: ParseResult):
     if pr.subject not in DATABASE:
@@ -213,7 +313,25 @@ def run(pr: ParseResult):
                 tmp.add_record(final_table.get_record(int(command.arg)))
                 final_table = tmp
 
-            # implement other commands
+            case 'filter':
+                tmp = Table(final_table.header)
+                for row in final_table.fuzzy_search(1, command.arg):
+                    tmp.add_record(row)
+                final_table = tmp
+
+            case 'link':
+                if len(final_table.rows) != 1:
+                    raise Exception('Invalid input table')
+
+                final_table = link(pr.ex, final_table.rows[0], final_table.rows[0])
+
+            case 'routes':
+                tmp = Table(['TOPIC', 'SUBJECT', 'NEXT HOP'])
+                for r in final_table.rows:
+                    for l in r.links:
+                        tmp.add_record(RouteRecord(r.arg, l.subject, l.id))
+                final_table = tmp
+
 
     return final_table.to_ascii_table()
 
@@ -231,14 +349,33 @@ def main(argv):
         header = next(reader)
         header.pop(0)
 
-        for row in reader:
+        for index, row in enumerate(reader):
             subject = row[0]
             if subject not in DATABASE.keys():
-                DATABASE[subject] = Table(header)
+                t = Table(header)
+                DATABASE[subject] = t
 
-            DATABASE[subject].add_record(Record(row[1], row[2]))
+            r = Record(row[1], row[2], subject=subject)
+            r.id = index + 2
+            DATABASE[subject].add_record(r)
+            LOOKUP[r.id] = r
+
+    with open(linkfile, 'r') as f:
+        reader = csv.reader(f)
+        header = next(reader)
+
+        for row in reader:
+            start_topic = int(row[0])
+            end_topic = int(row[1])
+
+            s = LOOKUP[start_topic]
+            e = LOOKUP[end_topic]
+
+            l = Link(e.subject, end_topic)
+            s.links.append(l)
             
-        # add links via linkfile
+            l = Link(s.subject, start_topic)
+            e.links.append(l)
 
     print('argrank testing\n\n')
 
