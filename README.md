@@ -6,7 +6,7 @@ argrank is a program developed to help italian students with their end-of-school
 
 The exam requires students to speak in front of a commission of six professors about all subjects, from history, to computer science, economics, mathemtics, computer netowrking, etc.
 
-The goal of argrank is to help students prepare for this exam by exploring possible links between subjects that can be used to build a more coherent speach. For example, one could ask argrank to build a full roadmap of subjects and topics starting from the [Cuban Missile Crisis]().
+The goal of argrank is to help students prepare for this exam by exploring possible links between subjects that can be used to build a more coherent speach. For example, one could ask argrank to build a full roadmap of subjects and topics starting from the [Cuban Missile Crisis](https://en.wikipedia.org/wiki/Cuban_Missile_Crisis).
 
 ## argrank query language
 argrank uses its own query languages and supports the SQL concept of closure.
