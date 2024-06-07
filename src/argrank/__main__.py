@@ -1,4 +1,6 @@
 import texttable
+import asyncio
+from websockets.server import serve
 import csv
 import sys
 import regex
@@ -11,6 +13,7 @@ class Comand:
 
     def __str__(self) -> str:
         return f'{self.command}({self.arg})'
+
 
 class ParseResult:
     def __init__(self):
@@ -26,6 +29,7 @@ Exclude: {', '.join(self.ex)}
 Query: {LINEBREAK.join(map(str, self.commands))}
 """
 
+
 class Token:
     def __init__(self) -> None:
         self.kind = None
@@ -34,6 +38,7 @@ class Token:
     def __str__(self) -> str:
         return f'{self.kind}[{self.value}]'
 
+
 class Link:
     def __init__(self, subject=None, id=None) -> None:
         self.subject = subject
@@ -41,6 +46,7 @@ class Link:
 
     def __str__(self) -> str:
         return f'{self.subject}({self.id})'
+
 
 class Record:
     def __init__(self, macro=None, arg=None, links=[], subject=None):
@@ -53,6 +59,7 @@ class Record:
     def to_array(self):
         return [self.id, self.macro, self.arg]
 
+
 class LinkedRecord:
     def __init__(self, subject, start_topic, end_topic) -> None:
         self.id = None
@@ -62,7 +69,8 @@ class LinkedRecord:
 
     def to_array(self):
         return [self.id, self.start_topic, self.end_topic]
-        
+
+
 class RouteRecord:
     def __init__(self, topic, subject, next_hop) -> None:
         self.id = None
@@ -72,8 +80,6 @@ class RouteRecord:
 
     def to_array(self):
         return [self.id, self.topic, self.subject, self.next_hop]
-        
-
 
 
 class Table:
@@ -81,26 +87,16 @@ class Table:
         self.header = header
         self.insert_index = 0
         self.rows = []
-        self.table_index = {}
-
 
     def add_record(self, record):
         self.rows.append(record)
         if record.id == None:
             record.id = self.insert_index
             self.insert_index += 1
-        self.table_index[record.id] = record
         return record.id
 
-
     def get_record(self, id):
-        if id in self.table_index:
-            return self.table_index[id]
-
-        for row in self.rows:
-            if row.id == id:
-                return row
-
+        return self.rows[id]
 
     def fuzzy_search(self, col, item):
         result = []
@@ -109,7 +105,6 @@ class Table:
             if len(r) > 0:
                 result.append(row)
         return result
-
 
     def to_ascii_table(self):
         if len(self.rows) == 0:
@@ -137,11 +132,16 @@ class Table:
 
         return table.draw()
 
-    # def add_to_index(self, index, id, value):
-    #     self.indices[index][]
+
+class RootTable(Table):
+    def get_record(self, id):
+        return self.rows[id - 2]
+
 
 DATABASE = {}
 LOOKUP = {}
+ROOT_TABLE: RootTable = None
+
 
 def lex(command: str):
     command = command.replace('\n', ' ').replace('\r', '')
@@ -205,6 +205,7 @@ def lex(command: str):
     tokens.append(eof)
     return tokens
 
+
 def parse(tokens: list):
     pos = 0
     r = ParseResult()
@@ -228,23 +229,24 @@ def parse(tokens: list):
             case 'ex':
                 r.ex.append(expect().value)
 
-            case 'filter' | 'select' | 'index':
+            case 'filter' | 'select':
                 c = Comand()
                 c.command = t.value
                 c.arg = expect().value
                 r.commands.append(c)
 
-            case 'link' | 'routes':
+            case 'link' | 'routes' | 'exit':
                 c = Comand()
                 c.command = t.value
                 r.commands.append(c)
 
         pos += 1
 
-        if tokens[pos].kind == 'EOF':
+        if pos > len(tokens) or tokens[pos].kind == 'EOF':
             break
 
     return r
+
 
 def link(excludes, topic, base_topic, prev_hop=None, explored=None):
     table = Table(['FROM', 'TO'])
@@ -272,10 +274,11 @@ def link(excludes, topic, base_topic, prev_hop=None, explored=None):
 
     for l in topic.links:
         if l.subject not in excludes and l.id not in explored and l.id != base_topic.id:
-            hop = LOOKUP[l.id]
+            hop = ROOT_TABLE.get_record(l.id)
             explored.append(l.id)
             r = link(excludes, hop, base_topic, topic, explored)
-            explored.clear()
+            if topic == base_topic:
+                explored.clear()
             t = Table(table.header)
             t.add_record(LinkedRecord(hop.subject, topic.arg, hop.arg))
 
@@ -283,6 +286,7 @@ def link(excludes, topic, base_topic, prev_hop=None, explored=None):
                 t.add_record(LinkedRecord(row.subject, row.start_topic, row.end_topic))
 
             if count_subjects(t) > count_subjects(table):
+                aux_tables.append(table)
                 table = t
             elif topic == base_topic:
                 aux_tables.append(t)
@@ -291,20 +295,22 @@ def link(excludes, topic, base_topic, prev_hop=None, explored=None):
         s = subjects(table)
         aux_tables = sorted(aux_tables, key=lambda t: len(t.rows), reverse=True)
         for aux in aux_tables:
-            for row in aux.rows:
-                if row.subject not in s or row.subject == base_topic.subject:
+            for index, row in enumerate(aux.rows):
+                if row.subject not in s or row.subject == base_topic.subject or (index > 0 and aux.rows[index - 1].subject == row.subject):
                     row.id = None
                     table.add_record(row)
                     s.append(row.subject)
 
     return table
 
+
 def run(pr: ParseResult):
-    if pr.subject not in DATABASE:
+    if pr.subject and pr.subject not in DATABASE:
         raise Exception(f'Unknown or unspecified subject {pr.subject}')
 
-    subject = DATABASE[pr.subject]
-    final_table = subject
+    final_table = ROOT_TABLE
+    if pr.subject:
+        final_table = DATABASE[pr.subject]
 
     for command in pr.commands:
         match (command.command):
@@ -332,22 +338,27 @@ def run(pr: ParseResult):
                         tmp.add_record(RouteRecord(r.arg, l.subject, l.id))
                 final_table = tmp
 
+            case 'exit':
+                return 'Good bye'
+
 
     return final_table.to_ascii_table()
 
 
 def main(argv):
-    if len(argv) < 3:
+    if len(argv) < 4:
         print('Insufficient arguments')
         return -1
 
-    subfile = argv[1]
-    linkfile = argv[2]
+    subfile = argv[2]
+    linkfile = argv[3]
 
     with open(subfile, 'r') as f:
         reader = csv.reader(f)
         header = next(reader)
         header.pop(0)
+        global ROOT_TABLE
+        ROOT_TABLE = RootTable(header)
 
         for index, row in enumerate(reader):
             subject = row[0]
@@ -358,7 +369,10 @@ def main(argv):
             r = Record(row[1], row[2], subject=subject)
             r.id = index + 2
             DATABASE[subject].add_record(r)
-            LOOKUP[r.id] = r
+            ROOT_TABLE.add_record(r)
+
+    if 'misc' in DATABASE.keys():
+        DATABASE.pop('misc')
 
     with open(linkfile, 'r') as f:
         reader = csv.reader(f)
@@ -368,8 +382,8 @@ def main(argv):
             start_topic = int(row[0])
             end_topic = int(row[1])
 
-            s = LOOKUP[start_topic]
-            e = LOOKUP[end_topic]
+            s = ROOT_TABLE.get_record(start_topic)
+            e = ROOT_TABLE.get_record(end_topic)
 
             l = Link(e.subject, end_topic)
             s.links.append(l)
@@ -377,18 +391,53 @@ def main(argv):
             l = Link(s.subject, start_topic)
             e.links.append(l)
 
-    print('argrank testing\n\n')
+    match (argv[1]):
+        case '--server':
+            print('argrank websocket server')
+            print('listening on port 8765')
 
-    while True:
-        command = ''
-        command = input('> ')
-        while command[len(command) - 1] != ';':
-            tmp = input('  ')
-            command += '\n' + tmp
-        command = command.replace(';', '')
-        
-        print(run(parse(lex(command))))
-        print()
+            async def echo(websocket):
+                async for message in websocket:
+                    try:
+                        r = run(parse(lex(message)))
+                        websocket.send(r)
+                    except Exception as e:
+                        websocket.send(f'ERROR: {e}')
+
+            async def serve_main():
+                async with serve(echo, "localhost", 8765):
+                    await asyncio.Future()
+
+            asyncio.run(serve_main())
+
+        case '--cli':
+            print('argrank cli')
+            print('follow the instructions at https://github.com/Alessandro-Salerno/argrank')
+            print()
+
+            while True:
+                command = ''
+                command = input('> ')
+                while command[len(command) - 1] != ';':
+                    tmp = input('  ')
+                    command += '\n' + tmp
+                command = command.replace(';', '')
+                
+                try:
+                    r = run(parse(lex(command)))
+                    print(r)
+                    if r == 'Good bye':
+                        return 0
+                except KeyboardInterrupt as ki:
+                    raise ki
+                except Exception as e:
+                    print(f'ERROR: {e}')
+                finally:
+                    print()
+
+        case _:
+            print('ERROR: Use --server or --cli')
+            return -1
 
 
 if __name__ == '__main__':
